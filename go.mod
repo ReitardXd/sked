@@ -1,4 +1,4 @@
-module github.com/reitard/djs
+module github.com/reitard/sked
 
 go 1.23
 
