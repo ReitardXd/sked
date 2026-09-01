@@ -24,7 +24,7 @@ func main() {
 
 	repo := job.NewRepository(pool)
 
-	// 1. Create a few jobs
+	// 1. Creating few jobs 
 	for i := 0; i < 3; i++ {
 		payload, _ := json.Marshal(map[string]any{"task": fmt.Sprintf("job-%d", i)})
 		j := job.NewJob(payload, 0, time.Now(), 5, nil)
