@@ -6,69 +6,75 @@ import (
 	"time"
 
 	"github.com/reitard/sked/internal/job"
+	"github.com/reitard/sked/internal/queue"
 )
 
 type Worker struct {
-	repo         *job.Repository
-	pollInterval time.Duration
-	batchSize    int
+	repo  *job.Repository
+	queue queue.Queue
+	name  string
 }
 
-func New(repo *job.Repository) *Worker {
-	return &Worker{repo: repo, pollInterval: 2 * time.Second, batchSize: 5}
+func New(repo *job.Repository, q queue.Queue, name string) *Worker {
+	return &Worker{repo: repo, queue: q, name: name}
 }
 
-// Run polls for pending jobs directly (Phase 1 — no queue yet).
-// In Phase 2 this gets replaced by consuming from Redis/RabbitMQ.
 func (w *Worker) Run(ctx context.Context) {
-	ticker := time.NewTicker(w.pollInterval)
-	defer ticker.Stop()
-
+	messages, err := w.queue.Consume(ctx, w.name)
+	if err != nil {
+		log.Fatalf("worker: consume setup failed: %v", err)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			w.pollAndExecute(ctx)
+		case msg, ok := <-messages:
+			if !ok {
+				return
+			}
+			w.handle(ctx, msg)
 		}
 	}
 }
 
-func (w *Worker) pollAndExecute(ctx context.Context) {
-	jobs, err := w.repo.ClaimPendingJobs(ctx, w.batchSize)
+func (w *Worker) handle(ctx context.Context, msg queue.Message) {
+	jobID, err := uuidFromString(msg.JobID)
 	if err != nil {
-		log.Printf("claim error: %v", err)
+		log.Printf("worker: bad job id %q: %v", msg.JobID, err)
+		msg.Ack(ctx) // drop malformed message, nothing we can do with it
 		return
 	}
-	for _, j := range jobs {
-		w.execute(ctx, j)
-	}
-}
 
-func (w *Worker) execute(ctx context.Context, j *job.Job) {
+	j, err := w.repo.GetJob(ctx, jobID)
+	if err != nil {
+		log.Printf("worker: fetch job %s: %v", jobID, err)
+		return // don't ack — let it be redelivered
+	}
+
 	if err := w.repo.MarkRunning(ctx, j.ID); err != nil {
-		log.Printf("mark running error for %s: %v", j.ID, err)
+		log.Printf("worker: mark running %s: %v", j.ID, err)
 		return
 	}
 
-	result, err := Execute(j)
-	if err != nil {
+	result, execErr := Execute(j)
+	if execErr != nil {
 		nextRunAt := time.Now().Add(backoff(j.Attempts))
-		if markErr := w.repo.MarkFailed(ctx, j.ID, err.Error(), nextRunAt); markErr != nil {
-			log.Printf("mark failed error for %s: %v", j.ID, markErr)
+		if err := w.repo.MarkFailed(ctx, j.ID, execErr.Error(), nextRunAt); err != nil {
+			log.Printf("worker: mark failed %s: %v", j.ID, err)
 		}
-		log.Printf("job %s failed: %v (attempt %d/%d)", j.ID, err, j.Attempts+1, j.MaxAttempts)
+		log.Printf("worker: job %s failed: %v (attempt %d/%d)", j.ID, execErr, j.Attempts+1, j.MaxAttempts)
+		msg.Ack(ctx) // scheduler will re-dispatch on next poll since status=pending again
 		return
 	}
 
 	if err := w.repo.MarkSucceeded(ctx, j.ID, result); err != nil {
-		log.Printf("mark succeeded error for %s: %v", j.ID, err)
+		log.Printf("worker: mark succeeded %s: %v", j.ID, err)
 		return
 	}
-	log.Printf("job %s succeeded", j.ID)
+	log.Printf("worker: job %s succeeded", j.ID)
+	msg.Ack(ctx)
 }
 
-// backoff is a simple exponential backoff, capped at 5 minutes.
 func backoff(attempts int) time.Duration {
 	d := time.Duration(1<<attempts) * time.Second
 	if d > 5*time.Minute {

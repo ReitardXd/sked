@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/reitard/sked/internal/config"
 	"github.com/reitard/sked/internal/job"
+	"github.com/reitard/sked/internal/queue"
 	"github.com/reitard/sked/internal/worker"
 )
 
@@ -28,10 +31,16 @@ func main() {
 	}
 	defer pool.Close()
 
-	repo := job.NewRepository(pool)
-	w := worker.New(repo)
+	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	defer redisClient.Close()
 
-	log.Println("worker started, polling for jobs...")
+	repo := job.NewRepository(pool)
+	q := queue.NewRedisQueue(redisClient)
+
+	hostname, _ := os.Hostname()
+	w := worker.New(repo, q, "worker-"+hostname)
+
+	log.Println("worker started, consuming from queue...")
 	w.Run(ctx)
 	log.Println("worker shutting down")
 }
