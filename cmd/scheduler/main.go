@@ -35,9 +35,10 @@ func main() {
 
 	repo := job.NewRepository(pool)
 	q := queue.NewRedisQueue(redisClient)
-	s := scheduler.New(repo, q)
+	elector := scheduler.NewLeaderElector(redisClient)
+	s := scheduler.New(repo, q, elector)
 
-	log.Println("scheduler started (single instance, no leader election yet)")
+	log.Println("scheduler started, competing for leadership...")
 	s.Run(ctx)
 	log.Println("scheduler shutting down")
 }

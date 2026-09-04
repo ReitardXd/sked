@@ -12,18 +12,18 @@ import (
 type Scheduler struct {
 	repo         *job.Repository
 	queue        queue.Queue
+	elector      *LeaderElector
 	pollInterval time.Duration
 	batchSize    int
 }
 
-func New(repo *job.Repository, q queue.Queue) *Scheduler {
-	return &Scheduler{repo: repo, queue: q, pollInterval: 2 * time.Second, batchSize: 10}
+func New(repo *job.Repository, q queue.Queue, elector *LeaderElector) *Scheduler {
+	return &Scheduler{repo: repo, queue: q, elector: elector, pollInterval: 2 * time.Second, batchSize: 10}
 }
 
-// Run polls Postgres for ready jobs and dispatches them onto the queue.
-// This is the only place ClaimPendingJobs is called from in Phase 2 —
-// workers no longer touch it directly.
 func (s *Scheduler) Run(ctx context.Context) {
+	go s.elector.Run(ctx)
+
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
 
@@ -32,6 +32,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if !s.elector.IsLeader() {
+				continue // standby: don't claim/dispatch unless leader
+			}
 			s.dispatch(ctx)
 		}
 	}
